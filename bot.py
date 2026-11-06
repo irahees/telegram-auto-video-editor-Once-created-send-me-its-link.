@@ -14,7 +14,7 @@ from telegram.ext import (
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 MAX_FILES = int(os.getenv("MAX_MEDIA_FILES", "20"))
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "45"))
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "20"))
 WORK_DIR = Path(os.getenv("WORK_DIR", "/tmp/video_bot"))
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -253,6 +253,13 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             JOBS.pop(uid, None)
 
 def main() -> None:
+    webhook_secret = os.environ.get("WEBHOOK_SECRET", "")
+    external_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("WEBHOOK_URL", "")
+    if not webhook_secret:
+        raise RuntimeError("WEBHOOK_SECRET is missing. Set it in Render Environment.")
+    if not external_url:
+        raise RuntimeError("RENDER_EXTERNAL_URL is missing. Deploy this app as a Render Web Service.")
+
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
@@ -260,7 +267,15 @@ def main() -> None:
     app.add_handler(CommandHandler("done", done))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
-    app.run_polling(drop_pending_updates=True)
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.getenv("PORT", "10000")),
+        url_path=webhook_secret,
+        webhook_url=f"{external_url.rstrip('/')}/{webhook_secret}",
+        secret_token=webhook_secret,
+        drop_pending_updates=True,
+    )
 
 if __name__ == "__main__":
     main()
