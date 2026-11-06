@@ -1,0 +1,14 @@
+services:
+  - type: worker
+    name: telegram-auto-video-editor
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: MAX_UPLOAD_MB
+        value: "45"
+      - key: MAX_MEDIA_FILES
+        value: "20"
