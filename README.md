@@ -6,21 +6,17 @@ A Telegram bot that accepts one reference video, your own video clips, and an op
 
 This is an automatic editing MVP, not frame-perfect AI style transfer. It matches the reference duration and approximate hard-cut rhythm. It does not understand semantic shot selection or recreate complex transitions, motion graphics, typography, masks, color grading, or beat-synchronized effects. The reference video's audio is not copied.
 
-## Create a Telegram bot
-
-1. Open Telegram and search for @BotFather.
-2. Send /newbot and follow the prompts.
-3. Copy the bot token and keep it private. Never commit it to GitHub or post it in chat.
-
 ## Deploy on Render
 
-1. Open Render and choose New → Blueprint.
-2. Connect this GitHub repository.
-3. Render reads render.yaml and creates the background worker.
-4. Add BOT_TOKEN as a secret environment variable in Render.
-5. Deploy the worker.
+This repository is configured for a Render Web Service using Telegram webhooks and the free plan.
 
-A continuously running polling bot needs an always-on background worker; Render's free web-service sleep behavior is not suitable. The included Blueprint uses the Starter worker plan, which may incur charges.
+1. Create a Render Web Service from this GitHub repository.
+2. Select the Docker runtime, Singapore region, and Free plan.
+3. Set `BOT_TOKEN` to the token from Telegram's @BotFather.
+4. Set `WEBHOOK_SECRET` to a long random value containing only letters, numbers, underscores, or hyphens.
+5. Deploy. Render supplies `RENDER_EXTERNAL_URL`; the bot registers its webhook automatically at startup.
+
+Never commit either secret to GitHub or post the bot token in chat.
 
 ## Use
 
@@ -30,9 +26,11 @@ A continuously running polling bot needs an always-on background worker; Render'
 - Optionally upload an audio soundtrack.
 - Send /done to render, or /cancel to clear the session.
 
-## Limits and privacy
+## Limits, free-tier behavior, and privacy
 
-- Per-file upload limit defaults to 45 MB and can be changed with MAX_UPLOAD_MB.
-- Telegram Bot API hosted file-download limits apply.
-- Render's local worker storage is temporary; session files are deleted after rendering or cancellation.
+- Per-file upload limit defaults to 20 MB. Telegram's hosted Bot API limits bot file downloads to 20 MB.
+- Render free web services can sleep after inactivity and may have cold-start delays. This is not a guaranteed always-on worker.
+- Session state and uploaded files are held in memory and temporary local storage. A restart or sleep/redeploy can interrupt an unfinished edit; this first version does not have durable session storage.
+- Free instances have limited CPU and memory, so long videos or many clips may fail during FFmpeg processing.
+- Temporary media is deleted after rendering or cancellation.
 - Only upload videos and audio you own or have permission to use.
