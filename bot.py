@@ -290,7 +290,23 @@ def make_filter(job: EditJob, durations: list[float], preview: bool = False) -> 
                 f"{grade}[v{i}]"
             )
         labels.append(f"[v{i}]")
-    graph.append("".join(labels) + f"concat=n={len(labels)}:v=1:a=0,format=yuv420p[vout]")
+    if len(labels) == 1:
+        graph.append(f"{labels[0]}format=yuv420p[vout]")
+    else:
+        transition = {"cinematic": "fade", "hype": "wipeleft", "aesthetic": "dissolve", "vlog": "smoothleft"}.get(job.style, "fade")
+        overlap = min(0.18, max(0.08, min(durations) * 0.18))
+        previous = labels[0]
+        elapsed = float(durations[0])
+        for i in range(1, len(labels)):
+            out_label = f"[xf{i}]"
+            offset = max(0.0, elapsed - overlap * i)
+            graph.append(
+                f"{previous}{labels[i]}xfade=transition={transition}:duration={overlap:.3f}:"
+                f"offset={offset:.3f},format=yuv420p{out_label}"
+            )
+            previous = out_label
+            elapsed += float(durations[i])
+        graph.append(f"{previous}format=yuv420p[vout]")
     return args, ";".join(graph), "[vout]"
 
 
@@ -417,6 +433,8 @@ def render(job: EditJob, output: Path, preview: bool = False) -> dict:
     job.media, job.media_kinds = old_media, old_kinds
 
     input_count = len(durations)
+    transition_overlap = min(0.18, max(0.08, min(durations) * 0.18)) if len(durations) > 1 else 0.0
+    final_duration = max(0.1, sum(durations) - transition_overlap * max(0, len(durations) - 1))
     audio_path = None
     if job.music_source == "reference" and job.reference:
         audio_path = CACHE / f"{sha256(job.reference)}.music.m4a"
@@ -427,7 +445,7 @@ def render(job: EditJob, output: Path, preview: bool = False) -> dict:
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *input_args]
     if audio_path and audio_path.exists():
         cmd += ["-stream_loop", "-1", "-i", str(audio_path)]
-        graph += ";[{}:a]atrim=duration={:.3f},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.4,afade=t=out:st={:.3f}:d=0.8,loudnorm=I=-16:TP=-1.5:LRA=11[aout]".format(input_count, sum(durations), max(0.0, sum(durations)-0.8))
+        graph += ";[{}:a]atrim=duration={:.3f},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.4,afade=t=out:st={:.3f}:d=0.8,loudnorm=I=-16:TP=-1.5:LRA=11[aout]".format(input_count, final_duration, max(0.0, final_duration-0.8))
     encoder, encoder_args = choose_encoder()
     width, height = FORMATS[job.format_name]
     if preview:
@@ -455,7 +473,7 @@ def render(job: EditJob, output: Path, preview: bool = False) -> dict:
     return {
         "seconds": round(time.monotonic() - started, 2),
         "encoder": encoder, "size_mb": round(output.stat().st_size / 1024 / 1024, 2),
-        "duration": round(sum(durations), 2), "preview": preview,
+        "duration": round(final_duration, 2), "preview": preview,
     }
 
 
