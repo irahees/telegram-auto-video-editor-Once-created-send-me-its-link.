@@ -21,7 +21,7 @@ Commands: `/start`, `/auto`, `/done`, `/cancel`, `/format 9:16|1:1|16:9`, `/musi
 - Reference SHA-256 cache; low-resolution sampled scene-change estimates.
 - Approximate tempo, beat and onset analysis using librosa.
 - Reference-audio extraction or user-supplied audio.
-- Optional OpenAI vision analysis of sampled reference/raw frames, returning clip descriptions, visual notes, detected text hints and a suggested raw-clip order. It is opt-in through `OPENAI_API_KEY`.
+- Offline OpenCV frame-quality analysis (sharpness, exposure and saturation) for raw clips. It requires no API key and sends no frames to a cloud AI service. It preserves upload order rather than pretending to understand clip semantics.
 - Raw video/image-only output; reference video is never a render input.
 - Images receive a Ken Burns-style zoom; style presets apply basic color grading and crossfade/wipe transitions.
 - Aspect-ratio crop, H.264 export, faststart, preview then final render.
