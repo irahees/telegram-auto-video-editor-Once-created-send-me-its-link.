@@ -443,9 +443,9 @@ async def handle_video_or_image(update: Update, context: ContextTypes.DEFAULT_TY
         await music_upload(update, context)
         return
     if job is None:
-        job = new_job(user.id, message.chat_id)
+        job = new_job(user.id, message.chat_id, "auto" if is_image else "reference")
         if is_image:
-            await message.reply_text("Auto-Edit mode started. Send /auto before uploading if you want to choose a style. This first upload will be treated as a raw image.")
+            await message.reply_text("Auto-Edit mode started. This image is your first raw shot. Send more clips/images, then /done.")
             await download_media(update, context)
         else:
             await message.reply_text("Reference video received next. Then send your own raw clips/images. Send /done when finished.")
@@ -636,6 +636,8 @@ async def finish_render(update: Update, context: ContextTypes.DEFAULT_TYPE, job:
                 music_map = await asyncio.to_thread(analyze_music, job.own_music)
                 if job.timeline:
                     job.timeline = remap_shots_to_beats(job.timeline, music_map)
+            elif job.music_source == "reference" and job.timeline:
+                job.timeline = remap_shots_to_beats(job.timeline, job.timeline.get("music", {}))
             elif job.music_source not in {"reference", "own", "silent"}:
                 await context.bot.edit_message_text("Choose a music option before rendering.", chat_id, status.message_id)
                 return
