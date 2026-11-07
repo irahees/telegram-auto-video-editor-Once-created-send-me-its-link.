@@ -433,7 +433,7 @@ def render(job: EditJob, output: Path, preview: bool = False) -> dict:
     job.media, job.media_kinds = old_media, old_kinds
 
     input_count = len(durations)
-    transition_overlap = min(0.18, max(0.08, min(durations) * 0.18)) if len(durations) > 1 else 0.0
+    transition_overlap = min(0.18, max(0.02, min(durations) * 0.25)) if len(durations) > 1 else 0.0
     final_duration = max(0.1, sum(durations) - transition_overlap * max(0, len(durations) - 1))
     audio_path = None
     if job.music_source == "reference" and job.reference:
