@@ -259,6 +259,15 @@ def make_filter(job: EditJob, durations: list[float], preview: bool = False) -> 
     args: list[str] = []
     graph: list[str] = []
     labels = []
+    style_grades = {
+        "cinematic": "eq=contrast=1.12:saturation=0.92:brightness=-0.01",
+        "hype": "eq=contrast=1.16:saturation=1.18:brightness=0.01",
+        "aesthetic": "eq=contrast=0.98:saturation=1.10:brightness=0.025",
+        "vlog": "eq=contrast=1.05:saturation=1.08:brightness=0.015",
+        "auto": "eq=contrast=1.06:saturation=1.08:brightness=0.01",
+        "reference": "eq=contrast=1.04:saturation=1.06:brightness=0.01",
+    }
+    grade = style_grades.get(job.style, style_grades["reference"])
     for i, (path, kind, dur) in enumerate(zip(job.media, job.media_kinds, durations)):
         if kind == "image":
             args += ["-loop", "1", "-t", f"{dur:.3f}", "-i", str(path)]
@@ -267,7 +276,7 @@ def make_filter(job: EditJob, durations: list[float], preview: bool = False) -> 
                 f"[{i}:v]scale={width*2}:{height*2}:force_original_aspect_ratio=increase,"
                 f"crop={width*2}:{height*2},zoompan=z='min(zoom+0.0008,1.12)':"
                 f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps=24,"
-                f"trim=duration={dur:.3f},setpts=PTS-STARTPTS,setsar=1[v{i}]"
+                f"trim=duration={dur:.3f},setpts=PTS-STARTPTS,{grade},setsar=1[v{i}]"
             )
         else:
             args += ["-i", str(path)]
@@ -275,7 +284,7 @@ def make_filter(job: EditJob, durations: list[float], preview: bool = False) -> 
                 f"[{i}:v]trim=duration={dur:.3f},setpts=PTS-STARTPTS,"
                 f"scale={width}:{height}:force_original_aspect_ratio=increase,"
                 f"crop={width}:{height},fps=24,setsar=1,"
-                f"eq=contrast=1.04:saturation=1.06:brightness=0.01[v{i}]"
+                f"{grade}[v{i}]"
             )
         labels.append(f"[v{i}]")
     graph.append("".join(labels) + f"concat=n={len(labels)}:v=1:a=0,format=yuv420p[vout]")
@@ -429,6 +438,10 @@ async def handle_video_or_image(update: Update, context: ContextTypes.DEFAULT_TY
         return
     job = ACTIVE_JOBS.get(user.id)
     is_image = bool(message.photo) or bool(message.document and (message.document.mime_type or "").startswith("image/"))
+    # While waiting for a soundtrack, a video upload is audio input, not another raw clip.
+    if job and job.music_source == "waiting":
+        await music_upload(update, context)
+        return
     if job is None:
         job = new_job(user.id, message.chat_id)
         if is_image:
@@ -536,6 +549,8 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await progress(update, "Analyzing reference cuts and music...")
         try:
             job.timeline = await asyncio.to_thread(analyze_reference, job.reference)
+            # Align the reference's estimated rhythm to its own detected beat grid too.
+            job.timeline = remap_shots_to_beats(job.timeline, job.timeline.get("music", {}))
             await progress(update, f"Analysis ready: {len(job.timeline.get('cuts', []))} estimated cuts. Choose music:")
             keyboard = [[
                 InlineKeyboardButton("🎵 Music from reference video", callback_data="music:reference"),
