@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -11,6 +12,8 @@ import subprocess
 import tempfile
 import time
 import uuid
+import urllib.request
+import urllib.error
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -291,6 +294,93 @@ def make_filter(job: EditJob, durations: list[float], preview: bool = False) -> 
     return args, ";".join(graph), "[vout]"
 
 
+
+def _frame_data_uri(path: Path, timestamp: Optional[float] = None) -> str:
+    """Return a compact JPEG frame as a data URI for optional OpenAI vision analysis."""
+    if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
+        image_path = path
+    else:
+        image_path = path.parent / f"vision-{uuid.uuid4().hex}.jpg"
+        seek = max(0.0, float(timestamp or 0.5))
+        run_cmd([
+            "ffmpeg", "-y", "-v", "error", "-ss", f"{seek:.3f}", "-i", str(path),
+            "-frames:v", "1", "-vf", "scale=512:-2", "-q:v", "5", str(image_path),
+        ], timeout=45)
+    raw = image_path.read_bytes()
+    if image_path != path:
+        image_path.unlink(missing_ok=True)
+    return "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
+
+
+def analyze_visual_content(job: EditJob) -> dict:
+    """Optional semantic matching through OpenAI vision; disabled unless an API key is configured."""
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return {"enabled": False, "reason": "OPENAI_API_KEY is not configured"}
+    try:
+        reference_frames = []
+        if job.reference:
+            shots = job.timeline.get("shots", []) if job.timeline else []
+            if shots:
+                chosen = shots[::max(1, len(shots) // 6)][:6]
+                for shot in chosen:
+                    mid = (float(shot.get("start", 0)) + float(shot.get("end", 0))) / 2
+                    reference_frames.append(_frame_data_uri(job.reference, mid))
+            else:
+                reference_frames.append(_frame_data_uri(job.reference, 0.5))
+        raw_frames = [_frame_data_uri(p, media_duration(p) / 2 if kind == "video" else None)
+                      for p, kind in zip(job.media[:16], job.media_kinds[:16])]
+        content = [{
+            "type": "text",
+            "text": (
+                "You are matching a video edit. Reference frames are shown first, then raw clips "
+                "labelled RAW_0, RAW_1, etc. The final edit must use ONLY raw clips. "
+                "Return strict JSON with keys clip_order (array of raw clip integer indices, "
+                "best narrative order), clip_descriptions (array of short strings in raw index order), "
+                "reference_style (short visual description), detected_text (array of visible text strings), "
+                "transition_hints (array of conservative transition labels). "
+                "Do not invent content. Include every useful raw index once in clip_order. "
+                "Prefer relevant, sharp, well-exposed clips; avoid duplicates when possible."
+            )
+        }]
+        for i, uri in enumerate(reference_frames):
+            content.append({"type": "text", "text": f"REFERENCE_FRAME_{i}"})
+            content.append({"type": "image_url", "image_url": {"url": uri, "detail": "low"}})
+        for i, uri in enumerate(raw_frames):
+            content.append({"type": "text", "text": f"RAW_{i}"})
+            content.append({"type": "image_url", "image_url": {"url": uri, "detail": "low"}})
+        payload = {
+            "model": os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"),
+            "messages": [
+                {"role": "system", "content": "Analyze supplied video frames accurately and output JSON only."},
+                {"role": "user", "content": content},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 900,
+        }
+        request = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=55) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        message = result["choices"][0]["message"]["content"]
+        parsed = json.loads(message)
+        order = [int(x) for x in parsed.get("clip_order", []) if str(x).isdigit()]
+        order = [x for x in order if 0 <= x < len(job.media)]
+        if not order:
+            order = list(range(len(job.media)))
+        parsed["clip_order"] = order
+        parsed["enabled"] = True
+        parsed["model"] = payload["model"]
+        return parsed
+    except Exception as exc:
+        log.warning("Optional visual analysis failed: %s", exc)
+        return {"enabled": False, "reason": str(exc)[:250]}
+
+
 def render(job: EditJob, output: Path, preview: bool = False) -> dict:
     started = time.monotonic()
     if not job.media:
@@ -313,8 +403,12 @@ def render(job: EditJob, output: Path, preview: bool = False) -> dict:
     # Reuse user media only; reference video is never added as a render input.
     if len(durations) > 80:
         durations = durations[:80]
-    chosen = [job.media[i % len(job.media)] for i in range(len(durations))]
-    kinds = [job.media_kinds[i % len(job.media_kinds)] for i in range(len(durations))]
+    clip_order = (job.timeline or {}).get("visual_analysis", {}).get("clip_order", [])
+    if not clip_order:
+        clip_order = list(range(len(job.media)))
+    chosen_indices = [clip_order[i % len(clip_order)] for i in range(len(durations))]
+    chosen = [job.media[i] for i in chosen_indices]
+    kinds = [job.media_kinds[i] for i in chosen_indices]
     old_media, old_kinds = job.media, job.media_kinds
     job.media, job.media_kinds = chosen, kinds
     input_args, graph, video_label = make_filter(job, durations, preview)
@@ -631,6 +725,11 @@ async def finish_render(update: Update, context: ContextTypes.DEFAULT_TYPE, job:
     started = time.monotonic()
     async with QUEUE_SEMAPHORE, lock:
         try:
+            if os.getenv("OPENAI_API_KEY", "").strip():
+                await context.bot.edit_message_text("AI is matching the visual content of your raw clips to the reference...", chat_id, status.message_id)
+                visual = await asyncio.to_thread(analyze_visual_content, job)
+                job.timeline = dict(job.timeline or {})
+                job.timeline["visual_analysis"] = visual
             if job.music_source == "own" and job.own_music:
                 await context.bot.edit_message_text("Analyzing music... Syncing cuts...", chat_id, status.message_id)
                 music_map = await asyncio.to_thread(analyze_music, job.own_music)
