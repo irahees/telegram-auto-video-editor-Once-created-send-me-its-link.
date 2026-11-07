@@ -139,6 +139,32 @@ def analyze_music(audio: Path) -> dict:
         return {"tempo_bpm": None, "beats": [], "onsets": [], "warning": str(exc)[:200]}
 
 
+def remap_shots_to_beats(timeline: dict, music: dict) -> dict:
+    """Snap reference pacing boundaries to nearby beats when a replacement track permits it."""
+    beats = music.get("beats") or []
+    shots = timeline.get("shots") or []
+    if not beats or len(shots) < 2:
+        return timeline
+    total = sum(float(s.get("duration", 0)) for s in shots)
+    boundaries = [0.0]
+    cursor = 0.0
+    for shot in shots[:-1]:
+        cursor += float(shot.get("duration", 0))
+        nearby = min(beats, key=lambda beat: abs(float(beat) - cursor))
+        if abs(float(nearby) - cursor) <= 0.18:
+            cursor = float(nearby)
+        cursor = max(boundaries[-1] + 0.45, min(cursor, total - 0.45))
+        boundaries.append(cursor)
+    boundaries.append(total)
+    updated = []
+    for start, end in zip(boundaries, boundaries[1:]):
+        updated.append({"start": round(start, 3), "end": round(end, 3), "duration": round(end-start, 3)})
+    result = dict(timeline)
+    result["shots"] = updated
+    result["replacement_music_sync"] = "approximate_nearby_beat_snap"
+    return result
+
+
 def scene_cuts(path: Path, duration: float) -> list[float]:
     log_text = run_cmd([
         "ffmpeg", "-hide_banner", "-i", str(path), "-vf",
@@ -592,7 +618,9 @@ async def finish_render(update: Update, context: ContextTypes.DEFAULT_TYPE, job:
         try:
             if job.music_source == "own" and job.own_music:
                 await context.bot.edit_message_text("Analyzing music... Syncing cuts...", chat_id, status.message_id)
-                await asyncio.to_thread(analyze_music, job.own_music)
+                music_map = await asyncio.to_thread(analyze_music, job.own_music)
+                if job.timeline:
+                    job.timeline = remap_shots_to_beats(job.timeline, music_map)
             elif job.music_source not in {"reference", "own", "silent"}:
                 await context.bot.edit_message_text("Choose a music option before rendering.", chat_id, status.message_id)
                 return
