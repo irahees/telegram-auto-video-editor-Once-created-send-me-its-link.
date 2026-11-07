@@ -10,7 +10,7 @@ Integrated rebuild baseline for reference-style and raw-only editing.
 
 ## Render deployment
 Set `BOT_TOKEN` privately in Render environment variables. Do not paste it into GitHub or chat.
-Optional variables: `WEBHOOK_SECRET`, `MAX_UPLOAD_MB` (default 20), `MAX_MEDIA_FILES` (default 20), `MAX_JOB_SECONDS` (default 900), `WORKERS` (default 1). Optional visual matching: set `OPENAI_API_KEY` privately and optionally `OPENAI_VISION_MODEL` (default `gpt-4o-mini`). Without the key, the editor runs without cloud vision analysis. When enabled, representative frames from the reference and user uploads are sent to the OpenAI API for semantic clip ordering; never put the key in source code or GitHub.
+Optional variables: `WEBHOOK_SECRET`, `MAX_UPLOAD_MB` (default 20), `MAX_MEDIA_FILES` (default 20), `MAX_JOB_SECONDS` (default 900), `WORKERS` (default 1). Visual analysis is performed locally with OpenCV; it does not require an OpenAI API key or send sampled frames to an external AI API.
 
 ## User flow
 Reference: send a reference video, upload raw clips/images, send `/done`, choose reference audio or upload music.
@@ -29,7 +29,7 @@ Commands: `/start`, `/auto`, `/done`, `/cancel`, `/format 9:16|1:1|16:9`, `/musi
 - Timeouts, error messages and per-job temporary-directory cleanup.
 
 ## Honest feature limits
-This is a functional baseline, not a full AI NLE clone. The finished reference cannot reveal exact original timeline/effect settings. Vision matching is a lightweight sampled-frame ranking aid, not full CLIP embeddings or frame-by-frame semantic search. Detected text is reported as a hint but is not yet animated/recreated; OCR tracking, Whisper captions, parallax segmentation, stabilization/denoise/upscale, true speed-ramp recovery, J/L-cut reconstruction, generated impact/riser SFX, and three independent edit variations remain unimplemented. Persistent cross-job style storage is not guaranteed on Render Free. Some inline controls are informational only. Render Free CPU cannot guarantee 15 seconds for a 30-second 1080p export or a GPU encoder.
+This is a functional baseline, not a full AI NLE clone. The finished reference cannot reveal exact original timeline/effect settings. Local visual analysis measures frame quality only; it does not provide semantic scene understanding, text recognition or true subject matching. No OpenAI API key is required, and no cloud vision requests are made.
 
 ## Local setup
 ```bash
