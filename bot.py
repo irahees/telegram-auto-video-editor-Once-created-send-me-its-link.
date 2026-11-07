@@ -284,6 +284,7 @@ def render(job: EditJob, output: Path, preview: bool = False) -> dict:
     input_args, graph, video_label = make_filter(job, durations, preview)
     job.media, job.media_kinds = old_media, old_kinds
 
+    input_count = len(durations)
     audio_path = None
     if job.music_source == "reference" and job.reference:
         audio_path = CACHE / f"{sha256(job.reference)}.music.m4a"
@@ -294,7 +295,7 @@ def render(job: EditJob, output: Path, preview: bool = False) -> dict:
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *input_args]
     if audio_path and audio_path.exists():
         cmd += ["-stream_loop", "-1", "-i", str(audio_path)]
-        graph += ";[{}:a]atrim=duration={:.3f},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.4,afade=t=out:st={:.3f}:d=0.8, loudnorm=I=-16:TP=-1.5:LRA=11[aout]".format(len(input_args) // 2, sum(durations), max(0.0, sum(durations)-0.8))
+        graph += ";[{}:a]atrim=duration={:.3f},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.4,afade=t=out:st={:.3f}:d=0.8,loudnorm=I=-16:TP=-1.5:LRA=11[aout]".format(input_count, sum(durations), max(0.0, sum(durations)-0.8))
     encoder, encoder_args = choose_encoder()
     width, height = FORMATS[job.format_name]
     if preview:
@@ -609,11 +610,6 @@ async def finish_render(update: Update, context: ContextTypes.DEFAULT_TYPE, job:
                 f"Encoder: {final_info['encoder']}\\n"
                 f"Output: {final_info['size_mb']} MB\\n"
                 "Note: actual time depends on CPU, input resolution, duration and available encoders.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("More energy", callback_data="control:energy"),
-                    InlineKeyboardButton("Smoother", callback_data="control:smooth"),
-                    InlineKeyboardButton("Re-render", callback_data="control:rerender"),
-                ]]),
             )
         except asyncio.TimeoutError:
             await context.bot.send_message(chat_id, "The render exceeded the configured timeout. Try shorter or smaller source files.")
@@ -727,7 +723,7 @@ def main() -> None:
     app.add_handler(CommandHandler("rerender", rerender))
     app.add_handler(CommandHandler("benchmark", benchmark))
     app.add_handler(CallbackQueryHandler(callback))
-    app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE, music_upload))
+    app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.Document.AUDIO, music_upload))
     app.add_handler(MessageHandler(filters.VIDEO | filters.PHOTO | filters.Document.ALL, handle_video_or_image))
     app.add_error_handler(error_handler)
 
