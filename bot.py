@@ -16,6 +16,10 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 MAX_FILES = int(os.getenv("MAX_MEDIA_FILES", "20"))
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "20"))
 WORK_DIR = Path(os.getenv("WORK_DIR", "/tmp/video_bot"))
+OUTPUT_WIDTH = int(os.getenv("OUTPUT_WIDTH", "720"))
+OUTPUT_HEIGHT = int(os.getenv("OUTPUT_HEIGHT", "1280"))
+OUTPUT_FPS = int(os.getenv("OUTPUT_FPS", "30"))
+FFMPEG_THREADS = max(1, int(os.getenv("FFMPEG_THREADS", "1")))
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
@@ -23,6 +27,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 log = logging.getLogger("auto-video-bot")
+# HTTP client INFO logs include full Telegram API URLs. Keep them out of Render logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 @dataclass
 class Job:
@@ -39,7 +46,7 @@ def lock_for(uid: int) -> asyncio.Lock:
 def run_ffmpeg(args: list[str]) -> None:
     p = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if p.returncode:
-        raise RuntimeError(p.stderr[-2500:] or "FFmpeg failed.")
+        raise RuntimeError(p.stderr[-1800:] or "FFmpeg failed.")
 
 def probe_duration(path: Path) -> float:
     p = subprocess.run(
@@ -59,10 +66,14 @@ def probe_duration(path: Path) -> float:
 
 def scene_times(video: Path) -> list[float]:
     p = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-i", str(video),
+        ["ffmpeg", "-hide_banner", "-threads", str(FFMPEG_THREADS),
+         "-filter_threads", "1", "-i", str(video),
          "-vf", "select='gt(scene,0.30)',showinfo", "-an", "-f", "null", "-"],
         capture_output=True, text=True
     )
+    if p.returncode:
+        log.warning("Scene analysis returned a non-zero status; using a single segment.")
+        return [0.0, probe_duration(video)]
     times = [0.0]
     for match in re.finditer(r"pts_time:([0-9.]+)", p.stderr):
         t = float(match.group(1))
@@ -84,12 +95,13 @@ def build_edit(reference: Path, clips: list[Path], soundtrack: Path | None, outp
         target_durations = [ref_duration]
 
     clip_durations = [probe_duration(c) for c in clips]
-    segments = []
+    segments: list[tuple[Path, float]] = []
     idx = 0
     remaining = ref_duration
     while remaining > 0.15 and len(segments) < 80:
-        src = clips[idx % len(clips)]
-        src_dur = clip_durations[idx % len(clips)]
+        clip_index = idx % len(clips)
+        src = clips[clip_index]
+        src_dur = clip_durations[clip_index]
         wanted = min(target_durations[idx % len(target_durations)], remaining, src_dur)
         if wanted < 0.15:
             wanted = min(remaining, src_dur)
@@ -100,36 +112,53 @@ def build_edit(reference: Path, clips: list[Path], soundtrack: Path | None, outp
     if remaining > 0.15:
         raise RuntimeError("The reference is too long or has too many cuts for this first version.")
 
-    filter_parts = []
-    inputs = []
-    input_offset = 1 if soundtrack else 0
-    for i, (src, dur) in enumerate(segments):
-        inputs += ["-i", str(src)]
-        input_index = i + input_offset
-        filter_parts.append(
-            f"[{input_index}:v]trim=duration={dur:.4f},setpts=PTS-STARTPTS,"
-            "scale=1080:1920:force_original_aspect_ratio=increase,"
-            "crop=1080:1920,fps=30,setsar=1,format=yuv420p"
-            f"[v{i}]"
-        )
-    concat_inputs = "".join(f"[v{i}]" for i in range(len(segments)))
-    filter_parts.append(f"{concat_inputs}concat=n={len(segments)}:v=1:a=0[outv]")
+    # Encode one short segment at a time. This avoids a large filter graph holding
+    # all uploaded clips in memory simultaneously on Render's small free instance.
+    segment_dir = output.parent / "segments"
+    shutil.rmtree(segment_dir, ignore_errors=True)
+    segment_dir.mkdir(parents=True, exist_ok=True)
+    segment_files: list[Path] = []
 
-    args = ["ffmpeg", "-y"]
+    for i, (src, duration) in enumerate(segments):
+        segment = segment_dir / f"segment_{i:03d}.mp4"
+        vf = (
+            f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={OUTPUT_WIDTH}:{OUTPUT_HEIGHT},fps={OUTPUT_FPS},setsar=1,format=yuv420p"
+        )
+        run_ffmpeg([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-threads", str(FFMPEG_THREADS), "-filter_threads", "1",
+            "-i", str(src), "-t", f"{duration:.4f}",
+            "-vf", vf, "-an",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+            "-threads", str(FFMPEG_THREADS), "-pix_fmt", "yuv420p",
+            str(segment)
+        ])
+        segment_files.append(segment)
+
+    concat_file = segment_dir / "concat.txt"
+    concat_file.write_text(
+        "".join(f"file '{p.as_posix()}'\n" for p in segment_files),
+        encoding="utf-8"
+    )
+
     if soundtrack:
-        args += ["-stream_loop", "-1", "-i", str(soundtrack)]
-    args += inputs
-    args += ["-filter_complex", ";".join(filter_parts), "-map", "[outv]"]
-    if soundtrack:
-        args += ["-map", "0:a:0", "-af", "volume=1.0", "-shortest"]
+        run_ffmpeg([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-threads", str(FFMPEG_THREADS), "-stream_loop", "-1", "-i", str(soundtrack),
+            "-f", "concat", "-safe", "0", "-i", str(concat_file),
+            "-map", "1:v:0", "-map", "0:a:0",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+            "-shortest", "-movflags", "+faststart", str(output)
+        ])
     else:
-        args += ["-an"]
-    args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-             "-movflags", "+faststart"]
-    if soundtrack:
-        args += ["-c:a", "aac", "-b:a", "192k"]
-    args += [str(output)]
-    run_ffmpeg(args)
+        run_ffmpeg([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "concat", "-safe", "0", "-i", str(concat_file),
+            "-map", "0:v:0", "-c:v", "copy",
+            "-movflags", "+faststart", str(output)
+        ])
+    shutil.rmtree(segment_dir, ignore_errors=True)
 
 async def download_media(update: Update, context: ContextTypes.DEFAULT_TYPE, prefix: str) -> Path:
     message = update.effective_message
