@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import json
 import logging
@@ -12,8 +11,6 @@ import subprocess
 import tempfile
 import time
 import uuid
-import urllib.request
-import urllib.error
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -311,92 +308,70 @@ def make_filter(job: EditJob, durations: list[float], preview: bool = False) -> 
 
 
 
-def _frame_data_uri(path: Path, timestamp: Optional[float] = None) -> str:
-    """Return a compact JPEG frame as a data URI for optional OpenAI vision analysis."""
-    image_path = path.parent / f"vision-{uuid.uuid4().hex}.jpg"
+def _sample_frame(path: Path, timestamp: Optional[float] = None) -> "np.ndarray":
+    """Decode one small frame locally with FFmpeg; no external API or upload."""
+    import cv2
     if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
-        run_cmd([
-            "ffmpeg", "-y", "-v", "error", "-i", str(path),
-            "-frames:v", "1", "-vf", "scale=512:-2", "-q:v", "5", str(image_path),
-        ], timeout=45)
+        frame = cv2.imread(str(path))
     else:
-        seek = max(0.0, float(timestamp or 0.5))
-        run_cmd([
-            "ffmpeg", "-y", "-v", "error", "-ss", f"{seek:.3f}", "-i", str(path),
-            "-frames:v", "1", "-vf", "scale=512:-2", "-q:v", "5", str(image_path),
-        ], timeout=45)
-    raw = image_path.read_bytes()
-    image_path.unlink(missing_ok=True)
-    return "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
+        cap = cv2.VideoCapture(str(path))
+        try:
+            if timestamp is not None:
+                cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, float(timestamp)) * 1000.0)
+            ok, frame = cap.read()
+        finally:
+            cap.release()
+        if not ok:
+            raise ValueError(f"Could not sample frame from {path.name}")
+    if frame is None:
+        raise ValueError(f"Could not decode {path.name}")
+    return cv2.resize(frame, (256, 144), interpolation=cv2.INTER_AREA)
+
+
+def _visual_quality(frame) -> tuple[float, float, float]:
+    """Return sharpness, exposure suitability and saturation from a local frame."""
+    import cv2
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    mean = float(gray.mean())
+    exposure = max(0.0, 1.0 - abs(mean - 128.0) / 128.0)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    saturation = float(hsv[:, :, 1].mean()) / 255.0
+    return sharpness, exposure, saturation
 
 
 def analyze_visual_content(job: EditJob) -> dict:
-    """Optional semantic matching through OpenAI vision; disabled unless an API key is configured."""
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        return {"enabled": False, "reason": "OPENAI_API_KEY is not configured"}
-    try:
-        reference_frames = []
-        if job.reference:
-            shots = job.timeline.get("shots", []) if job.timeline else []
-            if shots:
-                chosen = shots[::max(1, len(shots) // 6)][:6]
-                for shot in chosen:
-                    mid = (float(shot.get("start", 0)) + float(shot.get("end", 0))) / 2
-                    reference_frames.append(_frame_data_uri(job.reference, mid))
-            else:
-                reference_frames.append(_frame_data_uri(job.reference, 0.5))
-        raw_frames = [_frame_data_uri(p, media_duration(p) / 2 if kind == "video" else None)
-                      for p, kind in zip(job.media[:16], job.media_kinds[:16])]
-        content = [{
-            "type": "text",
-            "text": (
-                "You are matching a video edit. Reference frames are shown first, then raw clips "
-                "labelled RAW_0, RAW_1, etc. The final edit must use ONLY raw clips. "
-                "Return strict JSON with keys clip_order (array of raw clip integer indices, "
-                "best narrative order), clip_descriptions (array of short strings in raw index order), "
-                "reference_style (short visual description), detected_text (array of visible text strings), "
-                "transition_hints (array of conservative transition labels). "
-                "Do not invent content. Include every useful raw index once in clip_order. "
-                "Prefer relevant, sharp, well-exposed clips; avoid duplicates when possible."
-            )
-        }]
-        for i, uri in enumerate(reference_frames):
-            content.append({"type": "text", "text": f"REFERENCE_FRAME_{i}"})
-            content.append({"type": "image_url", "image_url": {"url": uri, "detail": "low"}})
-        for i, uri in enumerate(raw_frames):
-            content.append({"type": "text", "text": f"RAW_{i}"})
-            content.append({"type": "image_url", "image_url": {"url": uri, "detail": "low"}})
-        payload = {
-            "model": os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"),
-            "messages": [
-                {"role": "system", "content": "Analyze supplied video frames accurately and output JSON only."},
-                {"role": "user", "content": content},
-            ],
-            "response_format": {"type": "json_object"},
-            "max_tokens": 900,
-        }
-        request = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=55) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        message = result["choices"][0]["message"]["content"]
-        parsed = json.loads(message)
-        order = [int(x) for x in parsed.get("clip_order", []) if str(x).isdigit()]
-        order = [x for x in order if 0 <= x < len(job.media)]
-        if not order:
-            order = list(range(len(job.media)))
-        parsed["clip_order"] = order
-        parsed["enabled"] = True
-        parsed["model"] = payload["model"]
-        return parsed
-    except Exception as exc:
-        log.warning("Optional visual analysis failed: %s", exc)
-        return {"enabled": False, "reason": str(exc)[:250]}
+    """Offline frame-quality analysis. No API key, cloud inference, or per-request charge."""
+    import cv2  # OpenCV runs locally inside the worker.
+    qualities = []
+    descriptions = []
+    for index, (path, kind) in enumerate(zip(job.media, job.media_kinds)):
+        try:
+            sample_time = media_duration(path) * 0.5 if kind == "video" else None
+            frame = _sample_frame(path, sample_time)
+            sharpness, exposure, saturation = _visual_quality(frame)
+            # Log-scaled sharpness prevents high-texture clips from dominating completely.
+            score = (min(1.0, math.log1p(max(0.0, sharpness)) / 8.0) * 0.55
+                     + exposure * 0.35 + min(1.0, saturation * 1.4) * 0.10)
+            qualities.append((index, score))
+            focus = "sharp" if sharpness >= 45 else "soft"
+            light = "well-exposed" if exposure >= 0.65 else "dark-or-overexposed"
+            descriptions.append(f"Clip {index + 1}: {focus}, {light}, saturation {saturation:.2f}")
+        except Exception as exc:
+            log.warning("Local frame analysis failed for %s: %s", path.name, exc)
+            qualities.append((index, 0.0))
+            descriptions.append(f"Clip {index + 1}: analysis unavailable")
+    # Keep stable upload order by default; quality scores are metadata, not a story/semantic guess.
+    return {
+        "enabled": True,
+        "mode": "offline_opencv_quality",
+        "clip_order": list(range(len(job.media))),
+        "clip_descriptions": descriptions,
+        "quality_scores": {str(i): round(score, 3) for i, score in qualities},
+        "reference_style": "Reference cut timing and audio are analyzed separately; no cloud vision is used.",
+        "detected_text": [],
+        "transition_hints": [],
+    }
 
 
 def render(job: EditJob, output: Path, preview: bool = False) -> dict:
@@ -745,11 +720,10 @@ async def finish_render(update: Update, context: ContextTypes.DEFAULT_TYPE, job:
     started = time.monotonic()
     async with QUEUE_SEMAPHORE, lock:
         try:
-            if os.getenv("OPENAI_API_KEY", "").strip():
-                await context.bot.edit_message_text("AI is matching the visual content of your raw clips to the reference...", chat_id, status.message_id)
-                visual = await asyncio.to_thread(analyze_visual_content, job)
-                job.timeline = dict(job.timeline or {})
-                job.timeline["visual_analysis"] = visual
+            await context.bot.edit_message_text("Analyzing raw clips locally (no external AI API)...", chat_id, status.message_id)
+            visual = await asyncio.to_thread(analyze_visual_content, job)
+            job.timeline = dict(job.timeline or {})
+            job.timeline["visual_analysis"] = visual
             if job.music_source == "own" and job.own_music:
                 await context.bot.edit_message_text("Analyzing music... Syncing cuts...", chat_id, status.message_id)
                 music_map = await asyncio.to_thread(analyze_music, job.own_music)
