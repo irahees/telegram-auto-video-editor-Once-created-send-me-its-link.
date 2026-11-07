@@ -23,7 +23,7 @@ Commands: `/start`, `/auto`, `/done`, `/cancel`, `/format 9:16|1:1|16:9`, `/musi
 - Reference-audio extraction or user-supplied audio.
 - Optional OpenAI vision analysis of sampled reference/raw frames, returning clip descriptions, visual notes, detected text hints and a suggested raw-clip order. It is opt-in through `OPENAI_API_KEY`.
 - Raw video/image-only output; reference video is never a render input.
-- Images receive a Ken Burns-style zoom.
+- Images receive a Ken Burns-style zoom; style presets apply basic color grading and crossfade/wipe transitions.
 - Aspect-ratio crop, H.264 export, faststart, preview then final render.
 - Encoder capability probing with NVENC/QSV/VAAPI/VideoToolbox attempts and CPU fallback.
 - Timeouts, error messages and per-job temporary-directory cleanup.
