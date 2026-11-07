@@ -747,14 +747,7 @@ async def finish_render(update: Update, context: ContextTypes.DEFAULT_TYPE, job:
             elif job.music_source not in {"reference", "own", "silent"}:
                 await context.bot.edit_message_text("Choose a music option before rendering.", chat_id, status.message_id)
                 return
-            preview_path = job.root / "preview.mp4"
             final_path = job.root / "final.mp4"
-            await context.bot.edit_message_text("Rendering quick preview...", chat_id, status.message_id)
-            preview_info = await asyncio.wait_for(asyncio.to_thread(render, job, preview_path, True), timeout=MAX_JOB_SECONDS)
-            try:
-                await context.bot.send_video(chat_id, video=preview_path.open("rb"), caption="Quick preview (low resolution).")
-            except Exception:
-                log.exception("Preview delivery failed")
             await context.bot.edit_message_text("Rendering final video...", chat_id, status.message_id)
             final_info = await asyncio.wait_for(asyncio.to_thread(render, job, final_path, False), timeout=MAX_JOB_SECONDS)
             with final_path.open("rb") as stream:
