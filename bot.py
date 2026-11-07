@@ -297,18 +297,20 @@ def make_filter(job: EditJob, durations: list[float], preview: bool = False) -> 
 
 def _frame_data_uri(path: Path, timestamp: Optional[float] = None) -> str:
     """Return a compact JPEG frame as a data URI for optional OpenAI vision analysis."""
+    image_path = path.parent / f"vision-{uuid.uuid4().hex}.jpg"
     if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
-        image_path = path
+        run_cmd([
+            "ffmpeg", "-y", "-v", "error", "-i", str(path),
+            "-frames:v", "1", "-vf", "scale=512:-2", "-q:v", "5", str(image_path),
+        ], timeout=45)
     else:
-        image_path = path.parent / f"vision-{uuid.uuid4().hex}.jpg"
         seek = max(0.0, float(timestamp or 0.5))
         run_cmd([
             "ffmpeg", "-y", "-v", "error", "-ss", f"{seek:.3f}", "-i", str(path),
             "-frames:v", "1", "-vf", "scale=512:-2", "-q:v", "5", str(image_path),
         ], timeout=45)
     raw = image_path.read_bytes()
-    if image_path != path:
-        image_path.unlink(missing_ok=True)
+    image_path.unlink(missing_ok=True)
     return "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
 
 
