@@ -16,9 +16,9 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 MAX_FILES = int(os.getenv("MAX_MEDIA_FILES", "20"))
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "20"))
 WORK_DIR = Path(os.getenv("WORK_DIR", "/tmp/video_bot"))
-OUTPUT_WIDTH = int(os.getenv("OUTPUT_WIDTH", "720"))
-OUTPUT_HEIGHT = int(os.getenv("OUTPUT_HEIGHT", "1280"))
-OUTPUT_FPS = int(os.getenv("OUTPUT_FPS", "30"))
+OUTPUT_WIDTH = int(os.getenv("OUTPUT_WIDTH", "480"))
+OUTPUT_HEIGHT = int(os.getenv("OUTPUT_HEIGHT", "854"))
+OUTPUT_FPS = int(os.getenv("OUTPUT_FPS", "24"))
 FFMPEG_THREADS = max(1, int(os.getenv("FFMPEG_THREADS", "1")))
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -68,7 +68,7 @@ def scene_times(video: Path) -> list[float]:
     p = subprocess.run(
         ["ffmpeg", "-hide_banner", "-threads", str(FFMPEG_THREADS),
          "-filter_threads", "1", "-i", str(video),
-         "-vf", "select='gt(scene,0.30)',showinfo", "-an", "-f", "null", "-"],
+         "-vf", "fps=3,scale=320:-2,select='gt(scene,0.30)',showinfo", "-an", "-f", "null", "-"],
         capture_output=True, text=True
     )
     if p.returncode:
@@ -80,7 +80,7 @@ def scene_times(video: Path) -> list[float]:
         if t > 0.35 and t - times[-1] > 0.45:
             times.append(t)
     duration = probe_duration(video)
-    times = [t for t in times if t < duration - 0.25][:39]
+    times = [t for t in times if t < duration - 0.25][:24]
     times.append(duration)
     return times
 
@@ -130,7 +130,7 @@ def build_edit(reference: Path, clips: list[Path], soundtrack: Path | None, outp
             "-threads", str(FFMPEG_THREADS), "-filter_threads", "1",
             "-i", str(src), "-t", f"{duration:.4f}",
             "-vf", vf, "-an",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
             "-threads", str(FFMPEG_THREADS), "-pix_fmt", "yuv420p",
             str(segment)
         ])
