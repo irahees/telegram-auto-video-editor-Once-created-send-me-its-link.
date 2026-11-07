@@ -50,6 +50,7 @@ FORMATS = {
 ENCODER = None
 ACTIVE_JOBS: dict[int, "EditJob"] = {}
 USER_LOCKS: dict[int, asyncio.Lock] = {}
+USER_STYLE: dict[int, dict] = {}
 QUEUE_SEMAPHORE = asyncio.Semaphore(max(1, int(os.getenv("WORKERS", "1"))))
 
 
@@ -337,6 +338,8 @@ def new_job(user_id: int, chat_id: int, style: str = "reference") -> EditJob:
     root.mkdir(parents=True, exist_ok=True)
     job = EditJob(user_id=user_id, chat_id=chat_id, root=root, style=style)
     ACTIVE_JOBS[user_id] = job
+    if user_id in USER_STYLE:
+        job.timeline = USER_STYLE[user_id]
     return job
 
 
@@ -555,11 +558,20 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         elif choice == "own":
             job.music_source = "waiting"
             await query.edit_message_text("Send your music file (MP3, M4A, WAV, voice message, or a video with audio).")
+        elif choice == "silent":
+            job.music_source = "silent"
+            await query.edit_message_text("Rendering without a soundtrack...")
+            await finish_render(update, context, job)
         return
     if data.startswith("style:"):
         job.style = data.split(":", 1)[1]
-        await query.edit_message_text(f"Auto-Edit style set to {job.style}. Rendering your media...")
-        await finish_render(update, context, job)
+        await query.edit_message_text(
+            f"Auto-Edit style set to {job.style}. Choose music:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📁 Upload my music", callback_data="music:own"),
+                InlineKeyboardButton("🔇 No music", callback_data="music:silent"),
+            ]]),
+        )
         return
     if data.startswith("control:"):
         action = data.split(":", 1)[1]
@@ -581,7 +593,7 @@ async def finish_render(update: Update, context: ContextTypes.DEFAULT_TYPE, job:
             if job.music_source == "own" and job.own_music:
                 await context.bot.edit_message_text("Analyzing music... Syncing cuts...", chat_id, status.message_id)
                 await asyncio.to_thread(analyze_music, job.own_music)
-            elif job.music_source not in {"reference", "own"}:
+            elif job.music_source not in {"reference", "own", "silent"}:
                 await context.bot.edit_message_text("Choose a music option before rendering.", chat_id, status.message_id)
                 return
             preview_path = job.root / "preview.mp4"
@@ -626,7 +638,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🎬 Automatic Video Editor\\n\\n"
         "Reference mode: send one finished reference video, then your own clips/images, then /done.\\n"
         "Auto-Edit mode: send /auto, upload only your clips/images, then /done.\\n\\n"
-        "Commands: /auto /done /cancel /format /music /mystyles /usestyle /styles /benchmark /help"
+        "Commands: /auto /done /cancel /format /music /savestyle name /mystyles /usestyle name /styles /benchmark /help"
     )
 
 
@@ -665,17 +677,55 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await progress(update, "For a new job, choose reference music or your own track after /done. Change-music re-render is available in a later iteration; this running build currently handles one music choice per job.")
 
 
+async def save_style(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    job = ACTIVE_JOBS.get(user.id) if user else None
+    name = " ".join(context.args).strip()
+    if not user or not job or not job.timeline or not name:
+        await progress(update, "Analyze a reference first, then use /savestyle name.")
+        return
+    safe_name = "".join(ch for ch in name if ch.isalnum() or ch in "-_ ")[:40].strip()
+    if not safe_name:
+        await progress(update, "Use a style name containing letters or numbers.")
+        return
+    path = STYLES / f"{user.id}.json"
+    try:
+        saved = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        saved = {}
+    saved[safe_name] = job.timeline
+    path.write_text(json.dumps(saved, indent=2))
+    await progress(update, f"Saved reference timeline as '{safe_name}'. Render-host local storage may be temporary.")
+
+
 async def mystyles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not user:
         return
     path = STYLES / f"{user.id}.json"
-    styles = json.loads(path.read_text()) if path.exists() else []
-    await progress(update, "Saved styles: " + (", ".join(styles) if styles else "none yet"))
+    try:
+        saved = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        saved = {}
+    await progress(update, "Saved styles: " + (", ".join(saved.keys()) if saved else "none yet"))
 
 
 async def use_style(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await progress(update, "Usage: /usestyle name. Style saving/browsing is not enabled in this first integrated build yet.")
+    user = update.effective_user
+    name = " ".join(context.args).strip()
+    if not user or not name:
+        await progress(update, "Usage: /usestyle name")
+        return
+    path = STYLES / f"{user.id}.json"
+    try:
+        saved = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        saved = {}
+    if name not in saved:
+        await progress(update, "Style not found. Use /mystyles to see saved names.")
+        return
+    USER_STYLE[user.id] = saved[name]
+    await progress(update, f"Loaded '{name}'. Start a new edit; it will use the saved shot rhythm.")
 
 
 async def styles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -718,6 +768,7 @@ def main() -> None:
     app.add_handler(CommandHandler("format", set_format))
     app.add_handler(CommandHandler("music", music_command))
     app.add_handler(CommandHandler("mystyles", mystyles))
+    app.add_handler(CommandHandler("savestyle", save_style))
     app.add_handler(CommandHandler("usestyle", use_style))
     app.add_handler(CommandHandler("styles", styles))
     app.add_handler(CommandHandler("rerender", rerender))
