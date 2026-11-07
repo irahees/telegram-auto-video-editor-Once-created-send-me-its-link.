@@ -10,7 +10,7 @@ Integrated rebuild baseline for reference-style and raw-only editing.
 
 ## Render deployment
 Set `BOT_TOKEN` privately in Render environment variables. Do not paste it into GitHub or chat.
-Optional variables: `WEBHOOK_SECRET`, `MAX_UPLOAD_MB` (default 20), `MAX_MEDIA_FILES` (default 20), `MAX_JOB_SECONDS` (default 900), `WORKERS` (default 1).
+Optional variables: `WEBHOOK_SECRET`, `MAX_UPLOAD_MB` (default 20), `MAX_MEDIA_FILES` (default 20), `MAX_JOB_SECONDS` (default 900), `WORKERS` (default 1). Optional visual matching: set `OPENAI_API_KEY` privately and optionally `OPENAI_VISION_MODEL` (default `gpt-4o-mini`). Without the key, the editor runs without cloud vision analysis. When enabled, representative frames from the reference and user uploads are sent to the OpenAI API for semantic clip ordering; never put the key in source code or GitHub.
 
 ## User flow
 Reference: send a reference video, upload raw clips/images, send `/done`, choose reference audio or upload music.
@@ -21,6 +21,7 @@ Commands: `/start`, `/auto`, `/done`, `/cancel`, `/format 9:16|1:1|16:9`, `/musi
 - Reference SHA-256 cache; low-resolution sampled scene-change estimates.
 - Approximate tempo, beat and onset analysis using librosa.
 - Reference-audio extraction or user-supplied audio.
+- Optional OpenAI vision analysis of sampled reference/raw frames, returning clip descriptions, visual notes, detected text hints and a suggested raw-clip order. It is opt-in through `OPENAI_API_KEY`.
 - Raw video/image-only output; reference video is never a render input.
 - Images receive a Ken Burns-style zoom.
 - Aspect-ratio crop, H.264 export, faststart, preview then final render.
@@ -28,7 +29,7 @@ Commands: `/start`, `/auto`, `/done`, `/cancel`, `/format 9:16|1:1|16:9`, `/musi
 - Timeouts, error messages and per-job temporary-directory cleanup.
 
 ## Honest feature limits
-This is a functional baseline, not a full AI NLE clone. The finished reference cannot reveal exact original timeline/effect settings. This build does not yet implement robust CLIP semantic matching, OCR/motion-tracked text recreation, Whisper animated captions, parallax segmentation, stabilization/denoise/upscale, true speed-ramp recovery, J/L-cut reconstruction, impact/riser SFX generation, three independent edit variations, persistent cross-job style storage, or guaranteed 3–5 second previews. Some inline controls are informational only. Render Free CPU cannot guarantee 15 seconds for a 30-second 1080p export or a GPU encoder.
+This is a functional baseline, not a full AI NLE clone. The finished reference cannot reveal exact original timeline/effect settings. Vision matching is a lightweight sampled-frame ranking aid, not full CLIP embeddings or frame-by-frame semantic search. Detected text is reported as a hint but is not yet animated/recreated; OCR tracking, Whisper captions, parallax segmentation, stabilization/denoise/upscale, true speed-ramp recovery, J/L-cut reconstruction, generated impact/riser SFX, and three independent edit variations remain unimplemented. Persistent cross-job style storage is not guaranteed on Render Free. Some inline controls are informational only. Render Free CPU cannot guarantee 15 seconds for a 30-second 1080p export or a GPU encoder.
 
 ## Local setup
 ```bash
