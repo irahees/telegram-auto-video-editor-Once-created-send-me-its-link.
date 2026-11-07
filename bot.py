@@ -279,7 +279,7 @@ def make_filter(job: EditJob, durations: list[float], preview: bool = False) -> 
                 f"[{i}:v]scale={width*2}:{height*2}:force_original_aspect_ratio=increase,"
                 f"crop={width*2}:{height*2},zoompan=z='min(zoom+0.0008,1.12)':"
                 f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps=24,"
-                f"trim=duration={dur:.3f},setpts=PTS-STARTPTS,{grade},setsar=1[v{i}]"
+                f"trim=duration={dur:.3f},setpts=PTS-STARTPTS,{grade},setsar=1,format=yuv420p,settb=AVTB[v{i}]"
             )
         else:
             args += ["-i", str(path)]
@@ -287,14 +287,14 @@ def make_filter(job: EditJob, durations: list[float], preview: bool = False) -> 
                 f"[{i}:v]trim=duration={dur:.3f},setpts=PTS-STARTPTS,"
                 f"scale={width}:{height}:force_original_aspect_ratio=increase,"
                 f"crop={width}:{height},fps=24,setsar=1,"
-                f"{grade}[v{i}]"
+                f"{grade},format=yuv420p,settb=AVTB[v{i}]"
             )
         labels.append(f"[v{i}]")
     if len(labels) == 1:
         graph.append(f"{labels[0]}format=yuv420p[vout]")
     else:
         transition = {"cinematic": "fade", "hype": "wipeleft", "aesthetic": "dissolve", "vlog": "smoothleft"}.get(job.style, "fade")
-        overlap = min(0.18, max(0.08, min(durations) * 0.18))
+        overlap = min(0.18, max(0.02, min(durations) * 0.25))
         previous = labels[0]
         elapsed = float(durations[0])
         for i in range(1, len(labels)):
