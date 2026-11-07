@@ -27,6 +27,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("auto-video-editor")
+# HTTPX logs full Telegram Bot API URLs; suppress them to avoid exposing the bot token.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 PUBLIC_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
