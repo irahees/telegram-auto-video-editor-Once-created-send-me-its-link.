@@ -6,6 +6,7 @@ import subprocess
 import re
 import struct
 import statistics
+import json
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -127,7 +128,7 @@ def align_cuts_to_beats(cuts: list[float], beats: list[float], duration: float) 
     return result
 
 
-def make_segments(reference: Path, clips: list[Path], ref_beats: list[float]) -> list[tuple[Path, float, float]]:
+def make_segments(reference: Path, clips: list[Path], ref_beats: list[float], cuts: list[float] | None = None) -> list[tuple[Path, float, float]]:
     """Map reference cut durations onto different portions of the user's clips.
 
     The source offset advances for each clip instead of repeatedly taking its
@@ -136,7 +137,7 @@ def make_segments(reference: Path, clips: list[Path], ref_beats: list[float]) ->
     if not clips:
         raise RuntimeError("Upload at least one of your own clips.")
     ref_duration = probe_duration(reference)
-    cuts = align_cuts_to_beats(scene_times(reference), ref_beats, ref_duration)
+    cuts = cuts or align_cuts_to_beats(scene_times(reference), ref_beats, ref_duration)
     durations = [cuts[i + 1] - cuts[i] for i in range(len(cuts) - 1)]
     clip_durations = [probe_duration(c) for c in clips]
     cursors = [0.0 for _ in clips]
@@ -172,8 +173,29 @@ def make_segments(reference: Path, clips: list[Path], ref_beats: list[float]) ->
 def build_edit(reference: Path, clips: list[Path], soundtrack: Path | None, output: Path) -> None:
     if not clips:
         raise RuntimeError("Upload at least one of your own clips.")
+    ref_duration = probe_duration(reference)
+    raw_cuts = scene_times(reference)
     ref_beats = detect_beats(reference)
-    segments = make_segments(reference, clips, ref_beats)
+    aligned_cuts = align_cuts_to_beats(raw_cuts, ref_beats, ref_duration)
+    # Persist the measurable Stage 1 timeline for debugging and later stages.
+    analysis = {
+        "reference_duration_seconds": round(ref_duration, 3),
+        "scene_cut_times_seconds": [round(t, 3) for t in raw_cuts],
+        "beat_peak_times_seconds": [round(t, 3) for t in ref_beats],
+        "beat_aligned_cut_times_seconds": [round(t, 3) for t in aligned_cuts],
+        "shot_durations_seconds": [
+            round(aligned_cuts[i + 1] - aligned_cuts[i], 3)
+            for i in range(len(aligned_cuts) - 1)
+        ],
+        "speed_effect_analysis": "Not inferred in Stage 1: finished-video timing alone cannot reliably distinguish intentional speed ramps from naturally fast or slow motion."
+    }
+    analysis_path = output.parent / "reference_analysis.json"
+    analysis_path.write_text(json.dumps(analysis, indent=2), encoding="utf-8")
+    log.info(
+        "Stage 1 reference analysis: %.2fs, %d cuts, %d beat peaks",
+        ref_duration, max(0, len(raw_cuts) - 2), len(ref_beats)
+    )
+    segments = make_segments(reference, clips, ref_beats, aligned_cuts)
     segment_dir = output.parent / "segments"
     shutil.rmtree(segment_dir, ignore_errors=True)
     segment_dir.mkdir(parents=True, exist_ok=True)
