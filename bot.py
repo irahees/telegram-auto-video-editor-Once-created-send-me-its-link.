@@ -7,6 +7,8 @@ import re
 import struct
 import statistics
 import json
+import hashlib
+import time
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -22,6 +24,8 @@ OUTPUT_HEIGHT = int(os.getenv("OUTPUT_HEIGHT", "854"))
 OUTPUT_FPS = int(os.getenv("OUTPUT_FPS", "24"))
 FFMPEG_THREADS = max(1, int(os.getenv("FFMPEG_THREADS", "1")))
 WORK_DIR.mkdir(parents=True, exist_ok=True)
+ANALYSIS_CACHE = WORK_DIR / "analysis_cache"
+ANALYSIS_CACHE.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 log = logging.getLogger("auto-video-bot")
@@ -80,6 +84,69 @@ def scene_times(video: Path) -> list[float]:
     times = [t for t in times if t < duration - 0.20][:23]
     times.append(duration)
     return times
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def analyze_reference(reference: Path) -> dict:
+    """Stage 1: cache measurable reference cuts and audio transient peaks by file hash."""
+    file_hash = file_sha256(reference)
+    cache_path = ANALYSIS_CACHE / f"{file_hash}.json"
+    if cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if cached.get("reference_sha256") == file_hash:
+                log.info("Stage 1 reference analysis cache hit: %s", file_hash[:12])
+                return cached
+        except (OSError, json.JSONDecodeError):
+            log.warning("Ignoring invalid reference-analysis cache: %s", cache_path)
+
+    started = time.monotonic()
+    duration = probe_duration(reference)
+    cuts = scene_times(reference)
+    beats = detect_beats(reference)
+    aligned = align_cuts_to_beats(cuts, beats, duration)
+    timeline = {
+        "schema_version": 1,
+        "reference_sha256": file_hash,
+        "reference_duration_seconds": round(duration, 3),
+        "scene_cut_times_seconds": [round(t, 3) for t in cuts],
+        "beat_peak_times_seconds": [round(t, 3) for t in beats],
+        "beat_aligned_cut_times_seconds": [round(t, 3) for t in aligned],
+        "shot_durations_seconds": [
+            round(aligned[i + 1] - aligned[i], 3)
+            for i in range(len(aligned) - 1)
+        ],
+        "speed_effects": {
+            "status": "not_reliably_detectable_from_finished_video",
+            "sections": [],
+            "explanation": (
+                "A constant-frame-rate finished export does not reliably reveal "
+                "whether motion was intentionally sped up or slowed down. "
+                "No speed ramp is fabricated."
+            )
+        },
+        "detection_limits": {
+            "cuts": "scene-change estimates from a low-resolution sampled stream",
+            "beats": "audio transient peaks; approximate and not guaranteed musical beats",
+            "beat_alignment_tolerance_seconds": 0.14
+        },
+        "analysis_seconds": round(time.monotonic() - started, 3)
+    }
+    temp_path = cache_path.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(timeline, indent=2), encoding="utf-8")
+    temp_path.replace(cache_path)
+    log.info(
+        "Stage 1 analysis completed in %.2fs: %d cuts, %d transient peaks",
+        timeline["analysis_seconds"], max(0, len(cuts) - 2), len(beats)
+    )
+    return timeline
+
 
 def detect_beats(media: Path) -> list[float]:
     """Lightweight transient/RMS beat estimate; heuristic, not a music transcription engine."""
@@ -173,28 +240,13 @@ def make_segments(reference: Path, clips: list[Path], ref_beats: list[float], cu
 def build_edit(reference: Path, clips: list[Path], soundtrack: Path | None, output: Path) -> None:
     if not clips:
         raise RuntimeError("Upload at least one of your own clips.")
-    ref_duration = probe_duration(reference)
-    raw_cuts = scene_times(reference)
-    ref_beats = detect_beats(reference)
-    aligned_cuts = align_cuts_to_beats(raw_cuts, ref_beats, ref_duration)
-    # Persist the measurable Stage 1 timeline for debugging and later stages.
-    analysis = {
-        "reference_duration_seconds": round(ref_duration, 3),
-        "scene_cut_times_seconds": [round(t, 3) for t in raw_cuts],
-        "beat_peak_times_seconds": [round(t, 3) for t in ref_beats],
-        "beat_aligned_cut_times_seconds": [round(t, 3) for t in aligned_cuts],
-        "shot_durations_seconds": [
-            round(aligned_cuts[i + 1] - aligned_cuts[i], 3)
-            for i in range(len(aligned_cuts) - 1)
-        ],
-        "speed_effect_analysis": "Not inferred in Stage 1: finished-video timing alone cannot reliably distinguish intentional speed ramps from naturally fast or slow motion."
-    }
+    analysis = analyze_reference(reference)
+    ref_duration = float(analysis["reference_duration_seconds"])
+    ref_beats = [float(t) for t in analysis["beat_peak_times_seconds"]]
+    aligned_cuts = [float(t) for t in analysis["beat_aligned_cut_times_seconds"]]
+    # Keep a per-job copy for inspection; the hash-keyed cache survives job cleanup.
     analysis_path = output.parent / "reference_analysis.json"
     analysis_path.write_text(json.dumps(analysis, indent=2), encoding="utf-8")
-    log.info(
-        "Stage 1 reference analysis: %.2fs, %d cuts, %d beat peaks",
-        ref_duration, max(0, len(raw_cuts) - 2), len(ref_beats)
-    )
     segments = make_segments(reference, clips, ref_beats, aligned_cuts)
     segment_dir = output.parent / "segments"
     shutil.rmtree(segment_dir, ignore_errors=True)
