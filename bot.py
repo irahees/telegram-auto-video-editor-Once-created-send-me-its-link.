@@ -167,7 +167,7 @@ def build_edit(reference: Path, clips: list[Path], soundtrack: Path | None, outp
         vf = (
             f"scale={OUTPUT_WIDTH + 24}:{OUTPUT_HEIGHT + 24}:force_original_aspect_ratio=increase,"
             f"crop={OUTPUT_WIDTH}:{OUTPUT_HEIGHT},fps={OUTPUT_FPS},setsar=1,"
-            "eq=contrast=1.04:saturation=1.06:brightness=0.005,format=yuv420p"
+            "eq=contrast=1.04:saturation=1.06:brightness=0.005,format=yuv420p,settb=AVTB,setpts=PTS-STARTPTS"
         )
         run_ffmpeg([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -234,6 +234,28 @@ def build_edit(reference: Path, clips: list[Path], soundtrack: Path | None, outp
             ])
         else:
             shutil.copy2(segment_files[0], output)
+    # Re-encode the completed edit to a conservative MP4 profile for Android/Telegram playback.
+    compatible = output.with_name("final_edit_compatible.mp4")
+    run_ffmpeg([
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(output), "-map", "0:v:0", "-map", "0:a:0?",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
+        "-profile:v", "main", "-level", "3.1", "-pix_fmt", "yuv420p",
+        "-r", str(OUTPUT_FPS), "-fps_mode", "cfr",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+        "-movflags", "+faststart", str(compatible)
+    ])
+    if not compatible.exists() or compatible.stat().st_size < 10000:
+        raise RuntimeError("The rendered MP4 failed its output validation.")
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=codec_name,pix_fmt", "-of", "csv=p=0",
+         str(compatible)], capture_output=True, text=True
+    )
+    if probe.returncode or "h264" not in probe.stdout or "yuv420p" not in probe.stdout:
+        raise RuntimeError("The rendered video is not in a compatible H.264 format.")
+    output.unlink(missing_ok=True)
+    compatible.replace(output)
     shutil.rmtree(segment_dir, ignore_errors=True)
 
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE, prefix: str) -> Path:
