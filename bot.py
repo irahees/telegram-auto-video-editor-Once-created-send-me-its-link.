@@ -383,7 +383,13 @@ def render(job: EditJob, output: Path, preview: bool = False) -> dict:
     ref_shots = job.timeline.get("shots", [])
     if ref_shots:
         total = min(60.0, sum(float(s["duration"]) for s in ref_shots))
-        durations = [max(0.8, float(s["duration"])) for s in ref_shots]
+        # Never discard uploaded raw clips just because the reference has fewer detected shots.
+        # When there are more raw clips than reference shots, divide the reference runtime
+        # across every uploaded clip so each user's clip appears at least once.
+        if len(job.media) > len(ref_shots):
+            durations = [total / len(job.media)] * len(job.media)
+        else:
+            durations = [max(0.8, float(s["duration"])) for s in ref_shots]
     else:
         total = min(30.0, max(8.0, sum(media_duration(p) for p in job.media)))
         durations = []
@@ -447,10 +453,14 @@ def render(job: EditJob, output: Path, preview: bool = False) -> dict:
         raise RuntimeError(f"Render timed out after {MAX_JOB_SECONDS} seconds.")
     if not output.exists() or output.stat().st_size == 0:
         raise RuntimeError("FFmpeg completed without producing an output file.")
+    output_meta = probe(output)
+    if audio_path and audio_path.exists() and not output_meta["has_audio"]:
+        raise RuntimeError("A soundtrack was selected but the rendered file has no audio stream. Render rejected.")
     return {
         "seconds": round(time.monotonic() - started, 2),
         "encoder": encoder, "size_mb": round(output.stat().st_size / 1024 / 1024, 2),
         "duration": round(final_duration, 2), "preview": preview,
+        "has_audio": output_meta["has_audio"],
     }
 
 
@@ -643,8 +653,9 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # Align the reference's estimated rhythm to its own detected beat grid too.
             job.timeline = remap_shots_to_beats(job.timeline, job.timeline.get("music", {}))
             await progress(update, f"Analysis ready: {len(job.timeline.get('cuts', []))} estimated cuts. Choose music:")
+            reference_has_audio = bool(job.timeline.get("media", {}).get("has_audio"))
             keyboard = [[
-                InlineKeyboardButton("🎵 Music from reference video", callback_data="music:reference"),
+                *([InlineKeyboardButton("🎵 Music from reference video", callback_data="music:reference")] if reference_has_audio else []),
                 InlineKeyboardButton("📁 My own music file", callback_data="music:own"),
             ]]
             await update.effective_message.reply_text(
